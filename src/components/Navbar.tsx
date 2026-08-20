@@ -6,8 +6,9 @@ import {
   Share2,
   ExternalLink,
   RotateCcw,
-  Sparkles,
   ShieldCheck,
+  Database,
+  CheckCircle2,
 } from 'lucide-react';
 import { usePG } from '../context/PGContext';
 
@@ -23,8 +24,8 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenInviteModal }) => {
     activeView,
     setActiveView,
     resetToDemoData,
-    residents,
-    setTenantPortalResidentId,
+    isDbOnline,
+    setPublicPortalMode,
   } = usePG();
 
   const [showQuickMenu, setShowQuickMenu] = useState(false);
@@ -38,7 +39,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenInviteModal }) => {
   const unreadNotifs = notifications.filter((n) => !n.read).length;
 
   return (
-    <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200">
+    <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200 shadow-2xs">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16 gap-4">
           {/* Logo & PG Title */}
@@ -46,7 +47,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenInviteModal }) => {
             className="flex items-center gap-3 cursor-pointer"
             onClick={() => setActiveView('dashboard')}
           >
-            <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white shadow-sm flex-shrink-0">
+            <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white shadow-sm shrink-0">
               <Building2 className="w-5 h-5" />
             </div>
             <div>
@@ -58,7 +59,14 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenInviteModal }) => {
                   {pgSettings.type} PG
                 </span>
               </div>
-              <p className="text-[11px] text-slate-500 hidden sm:block">PG Operations & Management</p>
+              <div className="flex items-center gap-2 mt-0.5">
+                <p className="text-[11px] text-slate-500 hidden sm:block">PG Management System</p>
+                {/* Live MongoDB Status Indicator */}
+                <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.2 text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md">
+                  <Database className="w-2.5 h-2.5 text-emerald-600" />
+                  <span>MongoDB Live</span>
+                </span>
+              </div>
             </div>
           </div>
 
@@ -80,7 +88,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenInviteModal }) => {
             <button
               id="navbar-invite-btn"
               onClick={onOpenInviteModal}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold shadow-sm transition"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold shadow-sm transition active:scale-95"
             >
               <Share2 className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Invite Tenant</span>
@@ -89,7 +97,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenInviteModal }) => {
             {/* Notification Bell */}
             <button
               id="navbar-notifications-btn"
-              onClick={() => setActiveView('notifications')}
+              onClick={() => setActiveView('dashboard')}
               className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition relative"
               title="Notifications"
             >
@@ -119,13 +127,16 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenInviteModal }) => {
                 >
                   <div className="px-3 py-2 border-b border-slate-100">
                     <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                      Role & Switcher
+                      Role Switcher
                     </p>
                     <p className="text-xs font-bold text-slate-800">Admin Control Panel</p>
                   </div>
 
                   <button
-                    onClick={() => setActiveView('dashboard')}
+                    onClick={() => {
+                      setPublicPortalMode(false);
+                      setActiveView('dashboard');
+                    }}
                     className="w-full text-left px-3 py-2 text-xs text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 rounded-lg flex items-center gap-2 transition"
                   >
                     <ShieldCheck className="w-4 h-4 text-indigo-600" />
@@ -133,23 +144,11 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenInviteModal }) => {
                   </button>
 
                   <button
-                    onClick={() => {
-                      const sampleRes = residents[0];
-                      if (sampleRes) setTenantPortalResidentId(sampleRes.id);
-                      setActiveView('tenant-portal');
-                    }}
-                    className="w-full text-left px-3 py-2 text-xs text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 rounded-lg flex items-center gap-2 transition"
+                    onClick={() => setPublicPortalMode(true)}
+                    className="w-full text-left px-3 py-2 text-xs text-slate-700 hover:bg-emerald-50 hover:text-emerald-700 rounded-lg flex items-center gap-2 transition"
                   >
-                    <User className="w-4 h-4 text-emerald-600" />
-                    <span>View Tenant Portal (Rahul)</span>
-                  </button>
-
-                  <button
-                    onClick={() => setActiveView('tenant-onboarding')}
-                    className="w-full text-left px-3 py-2 text-xs text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 rounded-lg flex items-center gap-2 transition"
-                  >
-                    <ExternalLink className="w-4 h-4 text-purple-600" />
-                    <span>Preview Onboarding Form</span>
+                    <ExternalLink className="w-4 h-4 text-emerald-600" />
+                    <span>Tenant Onboarding Portal</span>
                   </button>
 
                   <div className="border-t border-slate-100 my-1"></div>

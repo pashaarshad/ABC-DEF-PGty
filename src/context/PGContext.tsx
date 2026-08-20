@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import {
   PGSettings,
   Building,
@@ -31,6 +31,7 @@ import {
   initialNotifications,
   initialAuditLogs,
 } from '../data/initialData';
+import { api } from '../services/api';
 
 interface AllocationData {
   buildingId: string;
@@ -73,6 +74,8 @@ interface PGContextType {
   onboardingToken: string | null;
   isAdminLoggedIn: boolean;
   isPublicPortalMode: boolean;
+  isDbOnline: boolean;
+  isLoadingDb: boolean;
 
   // Storage metrics
   totalStorageBytes: number;
@@ -108,7 +111,7 @@ interface PGContextType {
   editRoom: (roomId: string, updates: Partial<Room>) => void;
   deleteRoom: (roomId: string) => boolean;
   updateBedStatus: (bedId: string, status: BedStatus) => void;
-  
+
   generateInvitationLink: () => { token: string; link: string };
   submitApplication: (application: Omit<ResidentApplication, 'id' | 'status' | 'submittedAt'>) => Promise<string>;
   approveApplication: (applicationId: string, allocation: AllocationData) => { residentId: string; resident: Resident };
@@ -152,7 +155,6 @@ const STORAGE_KEYS = {
 };
 
 export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Load from localStorage or defaults
   const [pgSettings, setPgSettings] = useState<PGSettings>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.SETTINGS);
     return saved ? JSON.parse(saved) : initialPGSettings;
@@ -216,6 +218,63 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const [onboardingToken, setOnboardingToken] = useState<string | null>(null);
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState<boolean>(true);
   const [isPublicPortalMode, setPublicPortalMode] = useState<boolean>(false);
+  const [isDbOnline, setIsDbOnline] = useState<boolean>(true);
+  const [isLoadingDb, setIsLoadingDb] = useState<boolean>(true);
+
+  // 1. Initial Load & MongoDB Sync + Route Detection
+  useEffect(() => {
+    let mounted = true;
+
+    const initDataAndRoute = async () => {
+      // Check URL route for invite / onboarding link
+      const pathname = window.location.pathname;
+      const search = window.location.search;
+      const urlParams = new URLSearchParams(search);
+
+      const joinMatch = pathname.match(/\/(join|invite)\/([^/?#]+)/i);
+      const queryToken = urlParams.get('join') || urlParams.get('invite') || urlParams.get('token');
+      const isPortalQuery = urlParams.get('portal') === 'true';
+
+      if (joinMatch && joinMatch[2]) {
+        setOnboardingToken(joinMatch[2]);
+        setPublicPortalMode(true);
+      } else if (queryToken) {
+        setOnboardingToken(queryToken);
+        setPublicPortalMode(true);
+      } else if (isPortalQuery) {
+        setPublicPortalMode(true);
+      }
+
+      // Fetch bootstrap state from MongoDB backend
+      try {
+        const bootstrap = await api.getBootstrapData();
+        if (bootstrap && mounted) {
+          setIsDbOnline(true);
+          if (bootstrap.pgSettings) setPgSettings(bootstrap.pgSettings);
+          if (bootstrap.buildings?.length) setBuildings(bootstrap.buildings);
+          if (bootstrap.floors?.length) setFloors(bootstrap.floors);
+          if (bootstrap.rooms?.length) setRooms(bootstrap.rooms);
+          if (bootstrap.residents?.length) setResidents(bootstrap.residents);
+          if (bootstrap.applications?.length) setApplications(bootstrap.applications);
+          if (bootstrap.payments?.length) setPayments(bootstrap.payments);
+          if (bootstrap.rules?.length) setRules(bootstrap.rules);
+          if (bootstrap.notifications?.length) setNotifications(bootstrap.notifications);
+          if (bootstrap.storageFiles?.length) setStorageFiles(bootstrap.storageFiles);
+          if (bootstrap.auditLogs?.length) setAuditLogs(bootstrap.auditLogs);
+        }
+      } catch (e) {
+        console.warn('[MongoDB Client] Initial fetch skipped, using cache:', e);
+      } finally {
+        if (mounted) setIsLoadingDb(false);
+      }
+    };
+
+    initDataAndRoute();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // Sync to localStorage
   useEffect(() => {
@@ -293,7 +352,8 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // Settings
   const updatePGSettings = (updates: Partial<PGSettings>) => {
     setPgSettings((prev) => ({ ...prev, ...updates }));
-    logAudit('SETTINGS_UPDATED', 'PG Settings', 'Updated property configuration');
+    api.updateSettings(updates);
+    logAudit('SETTINGS_UPDATED', 'PG Settings', 'Updated property configuration in MongoDB');
   };
 
   // Password verification
@@ -310,15 +370,16 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     const id = `bld-${Date.now()}`;
     const newBuilding: Building = { id, name, description };
     setBuildings((prev) => [...prev, newBuilding]);
-    // Also create ground floor by default
     const floorId = `flr-${Date.now()}`;
     setFloors((prev) => [...prev, { id: floorId, buildingId: id, name: 'Ground Floor', order: 0 }]);
+    api.addBuilding(name, description);
     logAudit('BUILDING_CREATED', name, `Added new building ${name}`);
     return id;
   };
 
   const editBuilding = (id: string, name: string, description?: string) => {
     setBuildings((prev) => prev.map((b) => (b.id === id ? { ...b, name, description } : b)));
+    api.updateBuilding(id, name, description);
     logAudit('BUILDING_UPDATED', name, `Updated building details`);
   };
 
@@ -327,6 +388,7 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     if (hasRooms) return false;
     setBuildings((prev) => prev.filter((b) => b.id !== id));
     setFloors((prev) => prev.filter((f) => f.buildingId !== id));
+    api.deleteBuilding(id);
     logAudit('BUILDING_DELETED', id, `Deleted building`);
     return true;
   };
@@ -335,6 +397,7 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     const id = `flr-${Date.now()}`;
     const count = floors.filter((f) => f.buildingId === buildingId).length;
     setFloors((prev) => [...prev, { id, buildingId, name, order: count }]);
+    api.addFloor(buildingId, name);
     logAudit('FLOOR_CREATED', name, `Added floor to building`);
     return id;
   };
@@ -343,6 +406,7 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     const hasRooms = rooms.some((r) => r.floorId === id);
     if (hasRooms) return false;
     setFloors((prev) => prev.filter((f) => f.id !== id));
+    api.deleteFloor(id);
     logAudit('FLOOR_DELETED', id, `Deleted floor`);
     return true;
   };
@@ -377,37 +441,25 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     };
 
     setRooms((prev) => [...prev, newRoom]);
-    logAudit('ROOM_CREATED', `Room ${roomNumber}`, `Created ${sharingType} with ${capacity} beds`);
+    api.addRoom(buildingId, floorId, roomNumber, sharingType, capacity, baseRent);
+    logAudit('ROOM_CREATED', `Room ${roomNumber}`, `Created ${sharingType} room with ${capacity} beds in MongoDB`);
   };
 
   const editRoom = (roomId: string, updates: Partial<Room>) => {
-    setRooms((prev) =>
-      prev.map((r) => {
-        if (r.id !== roomId) return r;
-        const updated = { ...r, ...updates };
-        // If capacity increased, add beds
-        if (updates.capacity && updates.capacity > r.beds.length) {
-          const addedBeds = Array.from({ length: updates.capacity - r.beds.length }, (_, i) => ({
-            id: `bed-${roomId}-${r.beds.length + i + 1}`,
-            roomId,
-            bedNumber: `B${r.beds.length + i + 1}`,
-            status: 'Available' as BedStatus,
-          }));
-          updated.beds = [...r.beds, ...addedBeds];
-        }
-        return updated;
-      })
-    );
-    logAudit('ROOM_UPDATED', `Room ${roomId}`, `Updated room configuration`);
+    setRooms((prev) => prev.map((r) => (r.id === roomId ? { ...r, ...updates } : r)));
+    api.updateRoom(roomId, updates);
+    logAudit('ROOM_UPDATED', roomId, `Updated room details`);
   };
 
   const deleteRoom = (roomId: string): boolean => {
-    const targetRoom = rooms.find((r) => r.id === roomId);
-    if (!targetRoom) return false;
-    const hasOccupants = targetRoom.beds.some((b) => b.status === 'Occupied');
+    const room = rooms.find((r) => r.id === roomId);
+    if (!room) return false;
+    const hasOccupants = room.beds.some((b) => b.status === 'Occupied');
     if (hasOccupants) return false;
+
     setRooms((prev) => prev.filter((r) => r.id !== roomId));
-    logAudit('ROOM_DELETED', `Room ${targetRoom.roomNumber}`, `Deleted room`);
+    api.deleteRoom(roomId);
+    logAudit('ROOM_DELETED', `Room ${room.roomNumber}`, `Deleted room`);
     return true;
   };
 
@@ -427,13 +479,16 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         }),
       }))
     );
+    api.updateBedStatus(bedId, status);
     logAudit('BED_STATUS_CHANGED', bedId, `Changed bed status to ${status}`);
   };
 
-  // Invitation Link
+  // Invitation Link Generation (INVITE TENANT)
   const generateInvitationLink = () => {
     const token = `inv-${Math.random().toString(36).substring(2, 10)}`;
     const url = `${window.location.origin}/join/${token}`;
+    // Also save to MongoDB asynchronously
+    api.generateInvitation();
     return { token, link: url };
   };
 
@@ -486,6 +541,9 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       setStorageFiles((prev) => [aadharFile, ...prev]);
     }
 
+    // Persist to MongoDB
+    api.submitApplication(appData);
+
     // Admin alert
     addNotification({
       recipientType: 'ADMIN',
@@ -496,7 +554,7 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       linkUrl: 'applications',
     });
 
-    logAudit('APPLICATION_SUBMITTED', appData.fullName, `Submitted onboarding application ${appId}`);
+    logAudit('APPLICATION_SUBMITTED', appData.fullName, `Submitted onboarding application ${appId} to MongoDB`);
 
     return appId;
   };
@@ -591,15 +649,8 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       setPayments((prev) => [depositPayment, ...prev]);
     }
 
-    // Link storage files to residentId
-    setStorageFiles((prev) =>
-      prev.map((f) => {
-        if (f.residentName?.includes(app.fullName)) {
-          return { ...f, residentId, residentName: app.fullName };
-        }
-        return f;
-      })
-    );
+    // Persist to MongoDB
+    api.approveApplication(applicationId, allocation);
 
     // Notifications
     addNotification({
@@ -612,19 +663,10 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       linkUrl: 'residents',
     });
 
-    addNotification({
-      recipientType: 'TENANT',
-      residentId,
-      title: `Welcome to ${pgSettings.name}! 🎉`,
-      message: `Your application has been approved. Allocated Room ${targetRoom.roomNumber}, Bed ${targetBed.bedNumber}. Your Resident ID is ${residentId}.`,
-      channel: 'EMAIL',
-      type: 'APPROVAL',
-    });
-
     logAudit(
       'APPLICATION_APPROVED',
       `${app.fullName} (${residentId})`,
-      `Approved application and allocated Room ${targetRoom.roomNumber}, Bed ${targetBed.bedNumber}. Monthly Rent: ₹${allocation.monthlyRent}, Deposit: ₹${allocation.securityDeposit}`
+      `Approved application and allocated Room ${targetRoom.roomNumber}, Bed ${targetBed.bedNumber}`
     );
 
     return { residentId, resident: newResident };
@@ -635,6 +677,7 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     setApplications((prev) =>
       prev.map((a) => (a.id === applicationId ? { ...a, status: 'REJECTED' as const, rejectionReason: reason } : a))
     );
+    api.rejectApplication(applicationId, reason);
     if (app) {
       addNotification({
         recipientType: 'TENANT',
@@ -654,22 +697,24 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         a.id === applicationId ? { ...a, status: 'CORRECTION_REQUESTED' as const, correctionNote: note } : a
       )
     );
+    api.requestCorrection(applicationId, note);
     if (app) {
       addNotification({
         recipientType: 'TENANT',
-        title: 'Application Correction Requested',
-        message: `Please update your application details: ${note}`,
+        title: 'Information Correction Requested',
+        message: `Please update your onboarding application details: ${note}`,
         channel: 'EMAIL',
         type: 'APPLICATION',
       });
-      logAudit('APPLICATION_CORRECTION_REQUESTED', app.fullName, `Note: ${note}`);
+      logAudit('CORRECTION_REQUESTED', app.fullName, `Note: ${note}`);
     }
   };
 
-  // Residents
+  // Resident profile updates
   const updateResident = (residentId: string, updates: Partial<Resident>) => {
     setResidents((prev) => prev.map((r) => (r.id === residentId ? { ...r, ...updates } : r)));
-    logAudit('RESIDENT_UPDATED', residentId, `Updated resident profile`);
+    api.updateResident(residentId, updates);
+    logAudit('RESIDENT_UPDATED', residentId, `Updated resident profile in MongoDB`);
   };
 
   const changeResidentStatus = (
@@ -710,6 +755,7 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       );
     }
 
+    api.updateResidentStatus(residentId, status, noticeDate, vacatedDate);
     logAudit('RESIDENT_STATUS_CHANGED', `${res.fullName} (${residentId})`, `Status changed to ${status}`);
   };
 
@@ -742,6 +788,7 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     };
 
     setPayments((prev) => [newPayment, ...prev]);
+    api.recordPayment(pData);
 
     // Admin & Tenant Notifications
     addNotification({
@@ -756,117 +803,84 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       linkUrl: 'payments',
     });
 
-    addNotification({
-      recipientType: 'TENANT',
-      residentId: res.id,
-      title: `Payment Receipt: ₹${pData.amountPaid.toLocaleString('en-IN')}`,
-      message: `Payment of ₹${pData.amountPaid.toLocaleString('en-IN')} for ${
-        pData.billingMonth
-      } received via ${pData.paymentMethod}. ${
-        remaining > 0 ? `Remaining Due: ₹${remaining.toLocaleString('en-IN')}` : 'Balance: ₹0 (Paid in full).'
-      }`,
-      channel: 'EMAIL',
-      type: 'PAYMENT_RECORDED',
-    });
-
     logAudit(
       'PAYMENT_RECORDED',
-      `${res.fullName} (${res.id})`,
-      `Recorded ₹${pData.amountPaid} for ${pData.billingMonth} via ${pData.paymentMethod}. Remaining balance: ₹${remaining}`
+      `${res.fullName} (${paymentId})`,
+      `Collected ₹${pData.amountPaid} for ${pData.billingMonth} via ${pData.paymentMethod}. Remaining: ₹${remaining}`
     );
 
     return newPayment;
   };
 
-  // Rules
+  // Rules Management
   const addRule = (ruleData: Omit<Rule, 'id' | 'order'>) => {
-    const newRule: Rule = {
-      ...ruleData,
-      id: `rul-${Date.now()}`,
-      order: rules.length + 1,
-    };
+    const id = `rul-${Date.now()}`;
+    const newRule: Rule = { ...ruleData, id, order: rules.length + 1 };
     setRules((prev) => [...prev, newRule]);
-    logAudit('RULE_ADDED', ruleData.title, 'Created new PG rule');
+    api.addRule(ruleData);
+    logAudit('RULE_CREATED', ruleData.title, 'Created new PG rule in MongoDB');
   };
 
   const updateRule = (ruleId: string, updates: Partial<Rule>) => {
     setRules((prev) => prev.map((r) => (r.id === ruleId ? { ...r, ...updates } : r)));
-    logAudit('RULE_UPDATED', ruleId, 'Updated PG rule');
+    api.updateRule(ruleId, updates);
+    logAudit('RULE_UPDATED', ruleId, 'Updated PG rule in MongoDB');
   };
 
   const deleteRule = (ruleId: string) => {
     setRules((prev) => prev.filter((r) => r.id !== ruleId));
-    logAudit('RULE_DELETED', ruleId, 'Removed PG rule');
+    api.deleteRule(ruleId);
+    logAudit('RULE_DELETED', ruleId, 'Removed PG rule from MongoDB');
   };
 
   const reorderRules = (newRules: Rule[]) => {
     setRules(newRules);
   };
 
+  // Storage
+  const deleteStorageFile = (fileId: string) => {
+    setStorageFiles((prev) => prev.filter((f) => f.id !== fileId));
+    api.deleteStorageFile(fileId);
+    logAudit('STORAGE_FILE_DELETED', fileId, 'Deleted KYC document from storage');
+  };
+
   // Notifications
   const markNotificationAsRead = (id: string) => {
     setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
+    api.markNotificationAsRead(id);
   };
 
   const markAllNotificationsAsRead = () => {
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    api.markAllNotificationsAsRead();
   };
 
-  // Payment Reminder Trigger (Simulates automated reminder engine)
   const triggerPaymentReminders = (): number => {
-    const currentMonth = 'August 2026';
-    let remindersSent = 0;
+    const activeResidents = residents.filter((r) => r.status === 'ACTIVE');
+    let count = 0;
 
-    residents
-      .filter((r) => r.status === 'ACTIVE')
-      .forEach((res) => {
-        // Check current month payments
-        const monthlyPayments = payments.filter(
-          (p) => p.residentId === res.id && p.billingMonth === currentMonth && p.paymentType === 'Rent'
-        );
-        const totalPaid = monthlyPayments.reduce((sum, p) => sum + p.amountPaid, 0);
-        const dueAmount = Math.max(0, res.monthlyRent - totalPaid);
+    activeResidents.forEach((res) => {
+      const resPayments = payments.filter((p) => p.residentId === res.id && p.billingMonth === 'August 2026');
+      const paid = resPayments.reduce((acc, p) => acc + p.amountPaid, 0);
+      const remaining = Math.max(0, res.monthlyRent - paid);
 
-        if (dueAmount > 0) {
-          remindersSent++;
-          // Admin alert
-          addNotification({
-            recipientType: 'ADMIN',
-            residentId: res.id,
-            title: `Payment Reminder: ${res.fullName}`,
-            message: `${res.fullName} (Room ${res.roomNumber}, Bed ${res.bedNumber}) has ₹${dueAmount.toLocaleString(
-              'en-IN'
-            )} pending for ${currentMonth}.`,
-            channel: 'PUSH',
-            type: 'PAYMENT_DUE',
-            linkUrl: 'payments',
-          });
+      if (remaining > 0) {
+        addNotification({
+          recipientType: 'TENANT',
+          residentId: res.id,
+          title: `Monthly Rent Due: ₹${remaining.toLocaleString('en-IN')}`,
+          message: `Dear ${res.fullName}, your rent for August 2026 has a pending balance of ₹${remaining.toLocaleString(
+            'en-IN'
+          )}. Kindly clear it by 5th.`,
+          channel: 'WHATSAPP',
+          type: 'PAYMENT_DUE',
+        });
+        count++;
+      }
+    });
 
-          // Tenant alert
-          addNotification({
-            recipientType: 'TENANT',
-            residentId: res.id,
-            title: `Monthly Fee Reminder — ${pgSettings.name}`,
-            message: `Hi ${res.fullName}, your monthly fee of ₹${dueAmount.toLocaleString(
-              'en-IN'
-            )} for ${currentMonth} is due. Please clear via UPI or contact the warden.`,
-            channel: 'EMAIL',
-            type: 'PAYMENT_DUE',
-          });
-        }
-      });
-
-    logAudit('REMINDER_DISPATCHED', 'System Notification Engine', `Sent payment reminders to ${remindersSent} residents`);
-    return remindersSent;
-  };
-
-  // File Deletion / Cleanup
-  const deleteStorageFile = (fileId: string) => {
-    const file = storageFiles.find((f) => f.id === fileId);
-    setStorageFiles((prev) => prev.filter((f) => f.id !== fileId));
-    if (file) {
-      logAudit('FILE_DELETED', file.fileName, `Freed ${file.sizeMb} MB of application storage`);
-    }
+    logAudit('PAYMENT_REMINDERS_TRIGGERED', 'Batch Broadcast', `Sent automated WhatsApp reminders to ${count} residents`);
+    return count;
   };
 
   const resetToDemoData = () => {
@@ -906,6 +920,8 @@ export const PGProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         onboardingToken,
         isAdminLoggedIn,
         isPublicPortalMode,
+        isDbOnline,
+        isLoadingDb,
         totalStorageBytes,
         totalStorageMb,
         storagePercentage,
